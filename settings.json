@@ -1,0 +1,11 @@
+{
+    "base_url": "",
+    "modules": [
+        {
+            "folder_name":"alias",
+            "folder_name1":"alias1",
+            "folder_name2":"alias2"
+        }
+    ],
+    ".ASPXAUTH": ""
+}

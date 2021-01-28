@@ -10,12 +10,16 @@ from ffprobe import FFProbe
 PANOPTO_BASE = ""
 MODULES = {}
 TOKEN = ""
+SETTINGS_FILE = "settings.json"
 
-if not os.path.isfile("settings.json"):
-    with open("settings.json","w") as f:
+if os.path.isfile("alt_settings.json"):
+    SETTINGS_FILE = "alt_settings.json"
+
+if not os.path.isfile(SETTINGS_FILE):
+    with open(SETTINGS_FILE,"w") as f:
         f.write('{"base_url": "","modules": [{"example":"mapping"}],".ASPXAUTH": ""}')
 
-with open("settings.json") as f:
+with open(SETTINGS_FILE) as f:
     data = f.read().rstrip()
     jdata = json.loads(data)
     PANOPTO_BASE = jdata["base_url"]
