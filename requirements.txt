@@ -1,0 +1,3 @@
+auto-editor
+ffmpeg-normalize
+ffprobe-python
