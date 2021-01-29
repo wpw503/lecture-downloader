@@ -7,128 +7,88 @@ import shutil
 
 from ffprobe import FFProbe
 
-PANOPTO_BASE = ""
-MODULES = {}
-TOKEN = ""
-SETTINGS_FILE = "settings.json"
+s = requests.session()
 
-if os.path.isfile("alt_settings.json"):
-    SETTINGS_FILE = "alt_settings.json"
 
-if not os.path.isfile(SETTINGS_FILE):
-    with open(SETTINGS_FILE,"w") as f:
-        f.write('{"base_url": "","modules": [{"example":"mapping"}],".ASPXAUTH": ""}')
+def main():
+    panopto_base_url = ""  # base part of the panopto url
+    aspxauth_token = ""  # ASPXAUTH string from the .ASPXAUTH cookie
+    folders = dict()  # all folders that are to be downloaded, with aliases
 
-with open(SETTINGS_FILE) as f:
-    data = f.read().rstrip()
+    panopto_base_url, folders, aspxauth_token = load_settings()
+
+    s.cookies = requests.utils.cookiejar_from_dict(
+        {".ASPXAUTH": aspxauth_token})
+
+    download_videos(panopto_base_url, folders)
+
+
+def load_settings():
+    settings_file_path = "settings.json"
+    data = ""
+
+    if os.path.isfile("alt_settings.json"):
+        settings_file_path = "alt_settings.json"
+
+    if not os.path.isfile(settings_file_path):
+        with open(settings_file_path, "w") as f:
+            f.write(
+                '{"base_url": "","modules": [{"example":"mapping"}],".ASPXAUTH": ""}')
+
+    with open(settings_file_path) as f:
+        data = f.read().rstrip()
+
     jdata = json.loads(data)
-    PANOPTO_BASE = jdata["base_url"]
-    MODULES = jdata["modules"][0]
-    TOKEN = jdata[".ASPXAUTH"]
 
-s = requests.session()  # cheeky global variable
-s.cookies = requests.utils.cookiejar_from_dict({".ASPXAUTH": TOKEN})
+    return jdata["base_url"], jdata["modules"][0], jdata[".ASPXAUTH"]
 
 
-def shorten_video(src, dst, retrying=False):
-    if not os.path.isfile(dst):
-        print("Shortening " + src + "...")
-        subprocess.run(["auto-editor", src, "-o", dst, "--no_open"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        compress_video(dst)
-    else:
-        return  # return if already made
+def download_videos(base_url, folders):
+    all_folders = json_api("/Panopto/Api/v1.0-beta/Folders", base_url, {
+        "parentId": "null",
+        "folderSet": 1
+    })
 
-    # check if no file was made by auto-editor
-    if not os.path.isfile(dst) and not retrying:
-        print("auto-editor failed to shorten video, retrying with transcode...")
-        os.system("ffmpeg -i '" + src + "' -vf scale=1920:1080,fps=fps=30 '" +
-                  src + "_temp.mp4' -loglevel panic")
-        if os.path.isfile(src + "_temp.mp4"):
-            os.remove(src + "_temp.mp4")
-            shutil.move(src + "_temp.mp4", src)
-
-            shorten_video(src, dst, True)
-
-    # notify user of new video
-    # if os.path.isfile(dst):
-    #    os.system("notify-send 'Lecture Downloader' 'New video downloaded at " + dst + "'")
+    for folder in all_folders:
+        for m in folders.keys():
+            if folder["Name"].startswith(m):
+                download_folder(base_url, folders, folder)
 
 
-def compress_video(src):
-    if os.path.isfile(src):
-        print("Compressing " + src + " with x265 crf 28...")
-        subprocess.run(["ffmpeg", "-i", src, "-vcodec", "libx265", "-crf", "28", src + "_temp.mp4",
-                        "-loglevel", "panic"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.isfile(src + "_temp.mp4"):
-            os.remove(src)
-            shutil.move(src + "_temp.mp4", src)
-
-
-def transcode_video(src, dimentions="1920:1080", fps="30"):
-    os.system("ffmpeg -i '" + src + "' -vf scale=" + dimentions +
-              ",fps=fps=" + fps + " -a:b 48k '" + src + "_temp.mp4' -loglevel panic")
-    if os.path.isfile(src + "_temp.mp4"):
-        os.remove(src + "_temp.mp4")
-        shutil.move(src + "_temp.mp4", src)
-
-
-def process_audio(src):
-    print("Removing background noise from " + src + "...")
-    os.system("ffmpeg -i '" + src + "' -af afftdn audio.wav -loglevel panic")
-    if not os.path.isfile("audio.wav"):
-        return
-
-    print("Normalising audio for " + src + "...")
-    subprocess.run(["ffmpeg-normalize", "audio.wav", "-o", "audio2.wav",
-                    "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("Stitching video and audio back together for " + src + "...")
-    if os.path.isfile("audio.wav"):
-        os.remove("audio.wav")
-    if os.path.isfile("audio2.wav"):
-        os.system("ffmpeg -i '" + src +
-                  "' -i audio2.wav -map 0:0 -map 1:0 -c:v copy -c:a aac -b:a 256k -shortest OUTPUT.mp4 -loglevel panic")
-        os.remove("audio2.wav")
-        if os.path.isfile(src):
-            os.remove(src)
-        if os.path.isfile("OUTPUT.mp4"):
-            shutil.move("OUTPUT.mp4", src)
-
-
-# WHYYYY does panopto use at least 3 different types of API!?!?!?
-def json_api(endpoint, params=dict(), post=False, paramtype="params"):
+def json_api(endpoint, base_url, params=dict(), post=False, paramtype="params"):
     if post:
-        r = s.post(PANOPTO_BASE + endpoint, **{paramtype: params})
+        r = s.post(base_url + endpoint, **{paramtype: params})
     else:
-        r = s.get(PANOPTO_BASE + endpoint, **{paramtype: params})
+        r = s.get(base_url + endpoint, **{paramtype: params})
     if not r.ok:
         print(r.text)
     return json.loads(r.text)
 
 
 def name_normalize(name):
-    # .replace("-","")
     return name.replace("/", "").replace(" ", "").replace(":", "")
 
 
-def dl_session(session):
+def download_folder(base_url, folders, folder):
+    sessions = json_api("/Panopto/Services/Data.svc/GetSessions", base_url, {
+        "queryParameters": {
+            "folderID": folder["Id"],
+        }
+    }, True, "json")["d"]["Results"]
+
+    for session in sessions:
+        download_session(base_url, folders, session)
+
+
+def download_session(base_url, folders, session):
     dest_dir = os.path.join(
         "downloads",
-        MODULES[name_normalize(session["FolderName"])]  # ,
-        # name_normalize(session["SessionName"])
+        folders[name_normalize(session["FolderName"])]
     )
     if not os.path.exists(dest_dir):
         os.makedirs(dest_dir)
 
-    edit_dir = os.path.join(
-        "short",
-        MODULES[name_normalize(session["FolderName"])]  # ,
-        # name_normalize(session["SessionName"])
-    )
-    if not os.path.exists(edit_dir):
-        os.makedirs(edit_dir)
-
-    delivery_info = json_api("/Panopto/Pages/Viewer/DeliveryInfo.aspx", {
+    delivery_info = json_api("/Panopto/Pages/Viewer/DeliveryInfo.aspx", base_url, {
         "deliveryId": session["DeliveryID"],
         "responseType": "json"
     }, True, "data")
@@ -157,8 +117,12 @@ def dl_session(session):
             with youtube_dl.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([streams[i]["StreamUrl"]])
 
-            process_audio(dest_filename)
+    merge_streams(streams, dest_dir, filename)
+    process_file(os.path.join(dest_dir, filename + ".mp4"), filename,
+                 folders[name_normalize(session["FolderName"])])
 
+
+def merge_streams(streams, dest_dir, filename):
     if len(streams) == 2:
         if not os.path.isfile(os.path.join(dest_dir, filename + ".mp4")):
             meta_one = FFProbe(os.path.join(
@@ -176,10 +140,6 @@ def dl_session(session):
                     two_has_video = True
 
             if one_has_video and two_has_video:
-                print("Scaling video streams...")
-                #transcode_video(os.path.join(dest_dir, filename + "_0" + ".mp4"), "960:540")
-                #transcode_video(os.path.join(dest_dir, filename + "_1" + ".mp4"), "960:540")
-
                 print("Merging video streams...")
                 str_cmd = 'ffmpeg -y -i "__STREAM_ONE" -i "__STREAM_TWO" -filter_complex "nullsrc=size=1920x540 [base]; [0:v] scale=960x540 [upperleft]; [1:v] setpts=PTS-STARTPTS, scale=960x540 [upperright]; [base][upperleft] overlay=shortest=1 [tmp1]; [tmp1][upperright] overlay=shortest=1:x=960" -c:v libx264 "__OUTPUT_STREAM" -loglevel panic'
                 str_cmd = str_cmd.replace("__STREAM_ONE", os.path.join(
@@ -189,65 +149,94 @@ def dl_session(session):
                 str_cmd = str_cmd.replace(
                     "__OUTPUT_STREAM", os.path.join(dest_dir, filename + ".mp4"))
                 os.system(str_cmd)
-            elif one_has_video:
+            else:
                 print("Merging video streams...")
                 str_cmd = 'ffmpeg -y -i "__STREAM_ONE" -i "__STREAM_TWO" -map 0:0 -map 1:0 -c:v copy -c:a aac -b:a 256k -shortest "__OUTPUT_STREAM" -loglevel panic'
-                str_cmd = str_cmd.replace("__STREAM_ONE", os.path.join(
-                    dest_dir, filename + "_0" + ".mp4"))
-                str_cmd = str_cmd.replace("__STREAM_TWO", os.path.join(
-                    dest_dir, filename + "_1" + ".mp4"))
+
+                if one_has_video and two_has_video:
+                    str_cmd = 'ffmpeg -y -i "__STREAM_ONE" -i "__STREAM_TWO" -filter_complex "nullsrc=size=1920x540 [base]; [0:v] scale=960x540 [upperleft]; [1:v] setpts=PTS-STARTPTS, scale=960x540 [upperright]; [base][upperleft] overlay=shortest=1 [tmp1]; [tmp1][upperright] overlay=shortest=1:x=960" -c:v libx264 "__OUTPUT_STREAM" -loglevel panic'
+                    str_cmd = str_cmd.replace("__STREAM_ONE", os.path.join(
+                        dest_dir, filename + "_0" + ".mp4"))
+                    str_cmd = str_cmd.replace("__STREAM_TWO", os.path.join(
+                        dest_dir, filename + "_1" + ".mp4"))
+                elif one_has_video:
+                    str_cmd = str_cmd.replace("__STREAM_ONE", os.path.join(
+                        dest_dir, filename + "_0" + ".mp4"))
+                    str_cmd = str_cmd.replace("__STREAM_TWO", os.path.join(
+                        dest_dir, filename + "_1" + ".mp4"))
+                elif two_has_video:
+                    str_cmd = str_cmd.replace("__STREAM_TWO", os.path.join(
+                        dest_dir, filename + "_0" + ".mp4"))
+                    str_cmd = str_cmd.replace("__STREAM_ONE", os.path.join(
+                        dest_dir, filename + "_1" + ".mp4"))
+
                 str_cmd = str_cmd.replace(
                     "__OUTPUT_STREAM", os.path.join(dest_dir, filename + ".mp4"))
-                os.system(str_cmd)
-            elif two_has_video:
-                print("Merging video streams...")
-                str_cmd = 'ffmpeg -y -i "__STREAM_ONE" -i "__STREAM_TWO" -map 0:0 -map 1:0 -c:v copy -c:a aac -b:a 256k -shortest "__OUTPUT_STREAM" -loglevel panic'
-                str_cmd = str_cmd.replace("__STREAM_TWO", os.path.join(
-                    dest_dir, filename + "_0" + ".mp4"))
-                str_cmd = str_cmd.replace("__STREAM_ONE", os.path.join(
-                    dest_dir, filename + "_1" + ".mp4"))
-                str_cmd = str_cmd.replace(
-                    "__OUTPUT_STREAM", os.path.join(dest_dir, filename + ".mp4"))
+
                 os.system(str_cmd)
 
     elif len(streams) > 2:
         print("number of streams is not supported")
         return
 
-    shorten_video(os.path.join(dest_dir, filename + ".mp4"),
-                  os.path.join(edit_dir, filename + ".mp4"))
+
+def process_file(src, filename, folder):
+    short_dir = os.path.join(
+        "short",
+        folder
+    )
+    if not os.path.exists(short_dir):
+        os.makedirs(short_dir)
+
+    short_filename = os.path.join(short_dir, filename + ".mp4")
+
+    if not os.path.isfile(short_filename):
+        shutil.copy(src, short_filename)
+
+        process_audio(short_filename)
+        shorten_video(short_filename)
+        compress_video(short_filename)
 
 
-def dl_folder(folder):
-    sessions = json_api("/Panopto/Services/Data.svc/GetSessions", {
-        "queryParameters": {
-            "folderID": folder["Id"],
-        }
-    }, True, "json")["d"]["Results"]
+def process_audio(src):
+    print("Removing background noise from " + src + "...")
+    os.system("ffmpeg -i '" + src + "' -af afftdn '" +
+              src + "_audio.wav" + "' -loglevel panic")
+    if not os.path.isfile(src + "_audio.wav"):
+        return
 
-    for session in sessions:
-        dl_session(session)
+    print("Normalising audio for " + src + "...")
+    subprocess.run(["ffmpeg-normalize", src + "_audio.wav", "-o", src + "_audio2.wav",
+                    "-f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("Stitching video and audio back together for " + src + "...")
+    if os.path.isfile(src + "_audio.wav"):
+        os.remove(src + "_audio.wav")
+    if os.path.isfile(src + "_audio2.wav"):
+        os.system("ffmpeg -i '" + src +
+                  "' -i '" + src + "_audio2.wav" + "' -map 0:0 -map 1:0 -c:v copy -c:a aac -b:a 256k -shortest '" + src + "_temp.mp4" + "' -loglevel panic")
+        os.remove(src + "_audio2.wav")
+
+        if os.path.isfile(src + "_temp.mp4"):
+            shutil.move(src + "_temp.mp4", src)
 
 
-folders = json_api("/Panopto/Api/v1.0-beta/Folders", {
-    "parentId": "null",
-    "folderSet": 1
-})
+def shorten_video(src):
+    print("Shortening " + src + "...")
+    subprocess.run(["auto-editor", src, "-o", src + "_temp.mp4", "--no_open"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.path.isfile(src + "_temp.mp4"):
+        shutil.move(src + "_temp.mp4", src)
 
-# if os.path.isfile("/home/will/Documents/lectures/lock"):
-#    print("Script is already running!\n(delete the lock file if the script is not running")
 
-# else:
-#    open("/home/will/Documents/lectures/lock","a").close()
+def compress_video(src):
+    if os.path.isfile(src):
+        print("Compressing " + src + " with x265 crf 28...")
+        subprocess.run(["ffmpeg", "-i", src, "-vcodec", "libx265", "-crf", "28", src + "_temp.mp4",
+                        "-loglevel", "panic"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.isfile(src + "_temp.mp4"):
+            os.remove(src)
+            shutil.move(src + "_temp.mp4", src)
 
-for folder in folders:
-    """
-            Put an if statement here based on folder["Name"] if you just want a certain
-            module or year etc.
-            e.g.:
-    """
-    for m in MODULES.keys():
-        if folder["Name"].startswith(m):
-            dl_folder(folder)
 
-#    os.remove("/home/will/Documents/lectures/lock")
+if __name__ == "__main__":
+    main()
